@@ -1,9 +1,22 @@
-
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::error::Error;
 use std::io::{stdin};
 use std::sync::{Arc, Mutex};
 use midir::{Ignore, MidiInput};
+
+use std::collections::HashMap;
+use ringbuf::{traits::*,HeapRb};
+
+// REFERENCES
+//https://github.com/Boddlnagg/midir/blob/d7f7366ee68cfd4b6b4d5af03d8fe6611f2ef21b/examples/test_read_input.rs
+
+// Data Definitions
+struct MidiInfo {
+    note: u8,
+    freq: f32,
+    vel: u8
+}
+
 
 fn main() {
     match run() {
@@ -19,8 +32,10 @@ fn run() -> Result<(),Box<dyn Error>> {
 
     let sample_rate = config.sample_rate().0 as f32;
     let mut t = 0.0;
-    let freq = Arc::new(Mutex::new(440.0));
-    let freq_clone = Arc::clone(&freq);
+
+    let mut active_notes:HashMap<u8,f32> = HashMap::new();
+    let rb = HeapRb::<MidiInfo>::new(12);
+    let (mut q_in, mut q_out) = rb.split();
 
     let mut midi_in = MidiInput::new("midir reading input")?;
     midi_in.ignore(Ignore::None);
@@ -37,13 +52,18 @@ fn run() -> Result<(),Box<dyn Error>> {
         in_port,
         "midir-read-input",
         move |_stamp, message, _| {
+            // for now only proceed when we get regular messages
+            if message.len() != 3 { return; }
             let m = message[1];
-            {
-                let f = calc_freq_from_midi(m);
-                let mut freq = freq.lock().unwrap();
-                *freq = f;
-            }
-
+            let f = calc_freq_from_midi(m);
+            let info = MidiInfo {
+                note: m,
+                freq: f,
+                vel: message[2],
+            };
+            //let mut freq = freq.lock().unwrap();
+            //*freq = f;
+            let _ = q_in.try_push(info); // sus
         },
         ()
     )?;
@@ -51,8 +71,19 @@ fn run() -> Result<(),Box<dyn Error>> {
     let stream = device.build_output_stream(
         &config.into(),
         move |data: &mut [f32], _| {
-            let freq = *freq_clone.lock().unwrap();
-            write_data_stream(data, freq, &mut t, sample_rate)
+            // empty ring buffer, put into hash table
+            while !q_out.is_empty() {
+                let mi = q_out.try_pop().unwrap();
+                println!("mi.vel = {}", mi.vel);
+                if mi.vel == 0 {
+                    active_notes.remove(&mi.note);
+                }
+                else {
+                    active_notes.insert(mi.note, mi.freq);
+                }
+            }
+            //let freq = *freq_clone.lock().unwrap();
+            write_data_stream(data, &active_notes, &mut t, sample_rate)
         },
         |err| eprintln!("Error: {}", err),
         None,
@@ -67,12 +98,14 @@ fn run() -> Result<(),Box<dyn Error>> {
 }
 
 
-
-fn write_data_stream(data: &mut [f32], freq: f32, t: &mut f32, sample_rate: f32) {
+fn write_data_stream(data: &mut [f32], active_notes: &HashMap<u8,f32>, t: &mut f32, sample_rate: f32) {
     for sample in data.iter_mut() {
-        *sample = 0.5 * (2.0 * std::f32::consts::PI * freq * *t).sin();
+        *sample = 0.0;
+        for freq in active_notes.values() {
+            *sample += 0.5 * (2.0 * std::f32::consts::PI * freq * *t).sin();
+        }
         *t += 1.0 / sample_rate;
-        if *t > 1.0 {
+        if *t >= 1.0 {
             *t -= 1.0;
         }
     }
@@ -80,7 +113,7 @@ fn write_data_stream(data: &mut [f32], freq: f32, t: &mut f32, sample_rate: f32)
 
 // calculates fundamental frequency from midi value
 fn calc_freq_from_midi(m : u8) -> f32 {
-    (2.0f32).powf((m as f32 - 69.0)/12.0) * 440.0
+    2.0f32.powf((m as f32 - 69.0)/12.0) * 440.0
 }
 
 
