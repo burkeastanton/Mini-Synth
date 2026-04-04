@@ -3,7 +3,7 @@ use std::error::Error;
 use std::io::{stdin};
 use midir::{Ignore, MidiInput};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use ringbuf::{traits::*,HeapRb};
 
 // REFERENCES
@@ -64,9 +64,7 @@ fn run() -> Result<(),Box<dyn Error>> {
                 current_vel: 0.0,
                 phase: 0.0,
             };
-            //let mut freq = freq.lock().unwrap();
-            //*freq = f;
-            let _ = q_in.try_push(info); // sus
+            let _ = q_in.try_push(info);
         },
         ()
     )?;
@@ -87,6 +85,7 @@ fn run() -> Result<(),Box<dyn Error>> {
                 }
                 else {
                     active_notes.insert(ni.note, ni);
+                    println!("active notes.len() = {}", active_notes.len());
                 }
             }
             write_data_stream(data, &mut active_notes, sample_rate)
@@ -105,16 +104,27 @@ fn run() -> Result<(),Box<dyn Error>> {
 
 
 fn write_data_stream(data: &mut [f32], active_notes: &mut HashMap<u8,NoteInfo>, sample_rate: f32) {
+
     // fill the buffer with samples
     for sample in data.iter_mut() {
         *sample = 0.0;
+        let mut to_remove = HashSet::<u8>::new(); // FIXME this isn't performant probably
         // go through every active note
         for ni in active_notes.values_mut() {
             ni.current_vel += (ni.target_vel - ni.current_vel) / 1000.0; // handle clipping
             ni.phase += ni.freq / sample_rate; // update note timestep
             if ni.phase > 1.0 {ni.phase -= 1.0}; // loop phase back to stop floating point error
             // add computed note sample to whole sample
-            *sample += ni.current_vel * (2.0 * std::f32::consts::PI * ni.phase).sin();
+            //*sample += ni.current_vel * (2.0 * std::f32::consts::PI * ni.phase).sin();
+            *sample += ni.current_vel * ni.phase; // saw wave
+
+            // add note to removal set if
+            if ni.target_vel == 0.0 && ni.current_vel < 0.0001 {
+                to_remove.insert(ni.note);
+            }
+        }
+        for note in to_remove {
+            active_notes.remove(&note);
         }
     }
 }
